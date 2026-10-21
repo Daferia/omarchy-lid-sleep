@@ -25,7 +25,7 @@ omarchy hibernation setup
 Then add the plugin and put it on the bar:
 
 ```sh
-omarchy plugin add https://github.com/<you>/omarchy-lid-sleep.git
+omarchy plugin add https://github.com/Daferia/omarchy-lid-sleep.git
 omarchy plugin enable daferia.lid-sleep --before omarchy.power
 ```
 
