@@ -1,0 +1,206 @@
+#!/bin/bash
+# lid-sleep: choose what happens when the laptop lid closes.
+#
+# Default "windows" mode works like Windows 11 Modern Standby:
+#   lid closed -> light sleep (instant wake)
+#   still closed after the delay, on battery -> hibernate (uses ~0% battery)
+#   on AC power -> stays in light sleep
+#
+# Settings are systemd drop-in files, so they survive Omarchy updates:
+LOGIND_CONF=/etc/systemd/logind.conf.d/30-lid-sleep.conf
+SLEEP_CONF=/etc/systemd/sleep.conf.d/30-lid-sleep.conf
+HOOK=/usr/lib/systemd/system-sleep/lid-sleep-log
+STATE_DIR=/var/lib/lid-sleep
+
+set -euo pipefail
+
+# Under pkexec (the desktop widget) we are already root.
+SUDO=sudo; [[ $EUID -eq 0 ]] && SUDO=
+
+usage() {
+  cat <<USAGE
+Usage: lid-sleep <command>
+
+  status                 Show current lid/sleep settings and recent sleep history
+  set windows [DELAY]    Sleep, then hibernate after DELAY on battery (default 60min)
+  set suspend            Sleep only (old behavior, drains battery)
+  set hibernate          Hibernate immediately on lid close
+  set lock               Only lock the screen, stay awake
+  set ignore             Do nothing on lid close
+  delay DELAY            Change the hibernate delay (e.g. 30min, 2h)
+  history                Battery used during each recent sleep
+  json                   Status as JSON (used by the desktop widget)
+  test-hibernate         Hibernate right now to check it works (saves your session)
+  remove                 Remove lid-sleep settings and restore defaults
+  install                Link this script into ~/.local/bin
+
+DELAY uses systemd time format: 20min, 45min, 1h, 2h30min ...
+USAGE
+}
+
+valid_delay() { systemd-analyze timespan "$1" &>/dev/null; }
+
+hibernation_ready() {
+  grep -qw disk /sys/power/state &&
+    [[ -n $(cat /sys/power/resume 2>/dev/null | grep -v '^0:0$') ]] &&
+    swapon --show=NAME --noheadings | grep -q .
+}
+
+write_root_file() { # path, content
+  $SUDO install -d -m 755 "$(dirname "$1")"
+  printf '%s\n' "$2" | $SUDO tee "$1" >/dev/null
+}
+
+reload_logind() {
+  # HUP makes logind re-read its config without ending your session.
+  $SUDO systemctl kill -s HUP systemd-logind
+}
+
+install_hook() {
+  # Logs battery level before and after each sleep, so `lid-sleep history`
+  # can show how much battery a closed lid really cost.
+  write_root_file "$HOOK" '#!/bin/sh
+bat=$(ls -d /sys/class/power_supply/BAT* 2>/dev/null | head -1)
+[ -n "$bat" ] || exit 0
+pct=$(cat "$bat/capacity" 2>/dev/null)
+mkdir -p '"$STATE_DIR"'
+echo "$(date +%s) $1 $2 ${SYSTEMD_SLEEP_ACTION:-$2} $pct" >> '"$STATE_DIR"'/history
+tail -n 400 '"$STATE_DIR"'/history > '"$STATE_DIR"'/history.tmp && mv '"$STATE_DIR"'/history.tmp '"$STATE_DIR"'/history
+logger -t lid-sleep "$1 $2 (${SYSTEMD_SLEEP_ACTION:-$2}) battery=${pct}%"'
+  $SUDO chmod 755 "$HOOK"
+}
+
+apply_mode() { # action, delay
+  local action=$1 delay=${2:-}
+
+  write_root_file "$LOGIND_CONF" "# Managed by lid-sleep
+[Login]
+HandleLidSwitch=$action
+HandleLidSwitchExternalPower=$action
+# Closing the lid with an external monitor keeps working (clamshell mode)
+HandleLidSwitchDocked=ignore"
+
+  if [[ $action == suspend-then-hibernate ]]; then
+    write_root_file "$SLEEP_CONF" "# Managed by lid-sleep
+[Sleep]
+AllowSuspendThenHibernate=yes
+HibernateDelaySec=$delay
+# On AC power, stay in light sleep instead of hibernating
+HibernateOnACPower=no"
+  else
+    $SUDO rm -f "$SLEEP_CONF"
+  fi
+
+  install_hook
+  reload_logind
+}
+
+cmd_set() {
+  local mode=${1:-}
+  case $mode in
+    windows)
+      local delay=${2:-60min}
+      valid_delay "$delay" || { echo "Invalid delay: $delay" >&2; exit 1; }
+      if ! hibernation_ready; then
+        echo "Hibernation isn't set up. Run: omarchy hibernation setup  (then reboot)" >&2
+        exit 1
+      fi
+      apply_mode suspend-then-hibernate "$delay"
+      echo "Lid close: sleep, then hibernate after $delay on battery."
+      ;;
+    suspend) apply_mode suspend; echo "Lid close: sleep only." ;;
+    hibernate)
+      hibernation_ready || { echo "Hibernation isn't set up. Run: omarchy hibernation setup" >&2; exit 1; }
+      apply_mode hibernate; echo "Lid close: hibernate immediately." ;;
+    lock) apply_mode lock; echo "Lid close: lock screen only." ;;
+    ignore) apply_mode ignore; echo "Lid close: do nothing." ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+cmd_delay() {
+  local delay=${1:?Give a delay, e.g. 30min}
+  valid_delay "$delay" || { echo "Invalid delay: $delay" >&2; exit 1; }
+  grep -q 'suspend-then-hibernate' "$LOGIND_CONF" 2>/dev/null ||
+    { echo "Delay only applies to 'windows' mode. Run: lid-sleep set windows $delay" >&2; exit 1; }
+  apply_mode suspend-then-hibernate "$delay"
+  echo "Hibernate delay set to $delay."
+}
+
+cmd_history() {
+  local f=$STATE_DIR/history
+  if [[ ! -x $HOOK ]]; then
+    echo "Not recording: lid-sleep isn't turned on yet. Run: lid-sleep set windows"
+    return
+  fi
+  [[ -s $f ]] || { echo "No sleep history yet. Close the lid for a while first."; return; }
+  # Pair each "pre" line with the next "post" line.
+  awk '
+    $2=="pre"  { t=$1; p=$5; next }
+    $2=="post" && t {
+      mins=($1-t)/60; used=p-$5
+      rate = mins>0 ? used/(mins/60) : 0
+      printf "%s  %-22s %6.0f min  %3s%% -> %3s%%  (%.1f%%/hour)\n",
+        strftime("%Y-%m-%d %H:%M", t), $4, mins, p, $5, rate
+      t=0
+    }' "$f" | tail -n 15
+}
+
+cmd_status() {
+  echo "Lid close (battery): $(systemd-analyze cat-config systemd/logind.conf | awk -F= '/^HandleLidSwitch=/{v=$2} END{print v?v:"suspend (default)"}')"
+  echo "Lid close (AC):      $(systemd-analyze cat-config systemd/logind.conf | awk -F= '/^HandleLidSwitchExternalPower=/{v=$2} END{print v?v:"same as battery"}')"
+  local d; d=$(systemd-analyze cat-config systemd/sleep.conf | awk -F= '/^HibernateDelaySec=/{v=$2} END{print v}')
+  [[ -n $d ]] && echo "Hibernate after:     $d (on battery)"
+  echo "Sleep type:          $(cat /sys/power/mem_sleep)"
+  echo "Hibernation ready:   $(hibernation_ready && echo yes || echo no)"
+  echo
+  echo "Recent sleeps:"
+  cmd_history | sed 's/^/  /'
+}
+
+cmd_remove() {
+  $SUDO rm -f "$LOGIND_CONF" "$SLEEP_CONF" "$HOOK"
+  reload_logind
+  echo "Removed. Lid close is back to the system default (sleep only)."
+}
+
+cmd_install() {
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$(realpath "$0")" "$HOME/.local/bin/lid-sleep"
+  echo "Installed: ~/.local/bin/lid-sleep"
+}
+
+cmd_json() {
+  # Machine-readable status for the desktop widget.
+  local action delay mode ready=false
+  action=$(systemd-analyze cat-config systemd/logind.conf | awk -F= '/^HandleLidSwitch=/{v=$2} END{print v}')
+  delay=$(systemd-analyze cat-config systemd/sleep.conf | awk -F= '/^HibernateDelaySec=/{v=$2} END{print v}')
+  if [[ ! -f $LOGIND_CONF ]]; then mode=default
+  else case $action in
+    suspend-then-hibernate) mode=windows ;;
+    *) mode=${action:-suspend} ;;
+  esac; fi
+  hibernation_ready && ready=true
+  local hist=""
+  [[ -s $STATE_DIR/history ]] && hist=$(awk '
+    $2=="pre"  { t=$1; p=$5; next }
+    $2=="post" && t {
+      printf "%s{\"start\":%d,\"minutes\":%d,\"type\":\"%s\",\"from\":%d,\"to\":%d}",
+        sep, t, ($1-t)/60, $4, p, $5; sep=","; t=0
+    }' "$STATE_DIR/history")
+  printf '{"mode":"%s","delay":"%s","hibernationReady":%s,"recording":%s,"history":[%s]}\n' \
+    "$mode" "$delay" "$ready" "$([[ -x $HOOK ]] && echo true || echo false)" "$hist"
+}
+
+case ${1:-status} in
+  status) cmd_status ;;
+  set) shift; cmd_set "$@" ;;
+  delay) shift; cmd_delay "$@" ;;
+  history) cmd_history ;;
+  json) cmd_json ;;
+  test-hibernate) echo "Hibernating in 3s... power on again to resume."; sleep 3; systemctl hibernate ;;
+  remove) cmd_remove ;;
+  install) cmd_install ;;
+  -h|--help|help) usage ;;
+  *) usage; exit 1 ;;
+esac

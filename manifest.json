@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "daferia.lid-sleep",
+  "name": "Lid sleep",
+  "version": "1.0.0",
+  "author": "daferia",
+  "description": "Choose what happens when the lid closes, and see battery used while asleep",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Lid sleep",
+    "description": "Lid close mode and sleep battery history",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
