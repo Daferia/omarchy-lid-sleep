@@ -2,6 +2,8 @@
 
 Stop your laptop draining its battery with the lid closed, the way Windows 11 does it.
 
+![The Lid sleep widget open on the Omarchy bar](preview.png)
+
 Many newer laptops (Framework 13 AMD, recent Intel/AMD ultrabooks) only support
 **s2idle** "modern standby", a light sleep that keeps using about 1% of battery per hour.
 Windows gets around this by hibernating after a while. Linux can too, but it
