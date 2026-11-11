@@ -11,6 +11,14 @@ LOGIND_CONF=/etc/systemd/logind.conf.d/30-lid-sleep.conf
 SLEEP_CONF=/etc/systemd/sleep.conf.d/30-lid-sleep.conf
 HOOK=/usr/lib/systemd/system-sleep/lid-sleep-log
 STATE_DIR=/var/lib/lid-sleep
+KBD_HOOK=/usr/lib/systemd/system-sleep/lid-sleep-kbd-backlight
+KBD_UNIT=lid-sleep-kbd-backlight.service
+KBD_UNIT_FILE=/etc/systemd/system/$KBD_UNIT
+# Early boot (the disk password screen): a mkinitcpio hook and its drop-in.
+KBD_EARLY=lid-sleep-kbd-backlight
+KBD_EARLY_BUILD=/etc/initcpio/install/$KBD_EARLY
+KBD_EARLY_RUN=/etc/initcpio/hooks/$KBD_EARLY
+KBD_EARLY_CONF=/etc/mkinitcpio.conf.d/zz-$KBD_EARLY.conf
 
 set -euo pipefail
 
@@ -28,6 +36,9 @@ Usage: lid-sleep <command>
   set lock               Only lock the screen, stay awake
   set ignore             Do nothing on lid close
   delay DELAY            Change the hibernate delay (e.g. 30min, 2h)
+  backlight PERCENT      Keep the keyboard backlight at PERCENT while awake, and
+                         off while asleep or with the lid closed (e.g. 50)
+  backlight manual       Stop managing the keyboard backlight
   history                Battery used during each recent sleep
   json                   Status as JSON (used by the desktop widget)
   test-hibernate         Hibernate right now to check it works (saves your session)
@@ -68,6 +79,205 @@ echo "$(date +%s) $1 $2 ${SYSTEMD_SLEEP_ACTION:-$2} $pct" >> '"$STATE_DIR"'/hist
 tail -n 400 '"$STATE_DIR"'/history > '"$STATE_DIR"'/history.tmp && mv '"$STATE_DIR"'/history.tmp '"$STATE_DIR"'/history
 logger -t lid-sleep "$1 $2 (${SYSTEMD_SLEEP_ACTION:-$2}) battery=${pct}%"'
   $SUDO chmod 755 "$HOOK"
+}
+
+kbd_leds() { compgen -G '/sys/class/leds/*kbd_backlight*' || true; }
+
+kbd_level() { # the managed level, or "manual"
+  local level=""
+  [[ -x $KBD_HOOK ]] && level=$(sed -n 's/^LEVEL=\([0-9]*\)$/\1/p' "$KBD_HOOK")
+  echo "${level:-manual}"
+}
+
+kbd_modules() {
+  # Kernel modules behind the keyboard backlight, parent drivers first, so the
+  # boot image can bring the backlight up before the disk is unlocked.
+  local led dir mods=()
+  for led in $(kbd_leds); do
+    dir=$(readlink -f "$led/device") || continue
+    while [[ $dir == /sys/devices/*/* ]]; do
+      [[ -L $dir/driver/module ]] && mods=("$(basename "$(readlink -f "$dir/driver/module")")" "${mods[@]}")
+      dir=$(dirname "$dir")
+    done
+  done
+  echo "${mods[*]}"
+}
+
+rebuild_initramfs() {
+  local log rc=0
+  log=$(mktemp)
+  if command -v limine-mkinitcpio >/dev/null; then
+    $SUDO limine-mkinitcpio >"$log" 2>&1 || rc=1
+    # limine-mkinitcpio reports a kernel it could not rebuild and still exits 0.
+    if grep -q 'mkinitcpio failed for kernel' "$log"; then rc=1; fi
+  else
+    $SUDO mkinitcpio -P >"$log" 2>&1 || rc=1
+  fi
+  if (( rc )); then tail -n 20 "$log" >&2; fi
+  rm -f "$log"
+  return $rc
+}
+
+install_early_backlight() { # percent
+  # The service above only starts once the disk is unlocked. To light the keys
+  # on the disk password screen too, a small hook goes into the boot image.
+  # It needs the classic (udev) image; a systemd image doesn't run such hooks.
+  command -v mkinitcpio >/dev/null || return 0
+
+  local build
+  build="#!/usr/bin/env bash
+# Managed by lid-sleep
+build() {
+    local m
+    for m in $(kbd_modules); do add_module \"\$m\"; done
+    echo '$1' | add_file - /etc/lid-sleep-kbd-level 644
+    echo '$(kbd_modules)' | add_file - /etc/lid-sleep-kbd-modules 644
+    add_runscript
+}
+help() { echo 'Turns the keyboard backlight on before the disk password prompt (lid-sleep).'; }"
+
+  # Rebuilding the boot image is slow; skip it when nothing would change.
+  if [[ -f $KBD_EARLY_RUN && -f $KBD_EARLY_CONF && -f $KBD_EARLY_BUILD && $(cat "$KBD_EARLY_BUILD") == "$build" ]]; then
+    return 0
+  fi
+
+  write_root_file "$KBD_EARLY_BUILD" "$build"
+  write_root_file "$KBD_EARLY_RUN" '#!/usr/bin/ash
+# Managed by lid-sleep
+run_hook() {
+    local level led max m i=0
+    level=$(cat /etc/lid-sleep-kbd-level 2>/dev/null) || return 0
+    for m in $(cat /etc/lid-sleep-kbd-modules 2>/dev/null); do modprobe -q "$m" 2>/dev/null; done
+    # The backlight can take a moment to appear; give up after 2 seconds.
+    while [ "$i" -lt 20 ]; do
+        for led in /sys/class/leds/*kbd_backlight*; do
+            [ -e "$led/brightness" ] || continue
+            max=$(cat "$led/max_brightness")
+            echo $(( (max * level + 50) / 100 )) > "$led/brightness"
+            return 0
+        done
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 0
+}'
+  write_root_file "$KBD_EARLY_CONF" '# Managed by lid-sleep: light the keyboard before the disk password prompt.
+if [[ " ${HOOKS[*]} " == *" udev "* && " ${HOOKS[*]} " != *" '"$KBD_EARLY"' "* ]]; then
+  _lid_sleep_hooks=()
+  for _lid_sleep_hook in "${HOOKS[@]}"; do
+    [[ $_lid_sleep_hook == encrypt ]] && _lid_sleep_hooks+=('"$KBD_EARLY"')
+    _lid_sleep_hooks+=("$_lid_sleep_hook")
+  done
+  [[ " ${_lid_sleep_hooks[*]} " == *" '"$KBD_EARLY"' "* ]] || _lid_sleep_hooks+=('"$KBD_EARLY"')
+  HOOKS=("${_lid_sleep_hooks[@]}")
+  unset _lid_sleep_hooks _lid_sleep_hook
+fi'
+
+  if ! rebuild_initramfs; then
+    $SUDO rm -f "$KBD_EARLY_BUILD" "$KBD_EARLY_RUN" "$KBD_EARLY_CONF"
+    rebuild_initramfs || true
+    echo "Could not rebuild the boot image, so the backlight will come on after the disk password, not before." >&2
+    return 1
+  fi
+}
+
+remove_early_backlight() {
+  [[ -f $KBD_EARLY_BUILD || -f $KBD_EARLY_RUN || -f $KBD_EARLY_CONF ]] || return 0
+  $SUDO rm -f "$KBD_EARLY_BUILD" "$KBD_EARLY_RUN" "$KBD_EARLY_CONF"
+  rebuild_initramfs || echo "Could not rebuild the boot image; run limine-mkinitcpio or mkinitcpio -P." >&2
+}
+
+install_backlight() { # percent
+  # One script does both jobs: systemd runs it with pre/post around every
+  # sleep, and the service below runs it with "watch" to set the level at boot
+  # and follow the lid while the laptop stays awake (docked).
+  write_root_file "$KBD_HOOK" '#!/bin/bash
+# Managed by lid-sleep. Keyboard backlight: LEVEL% while awake with the lid
+# open, off while asleep or with the lid closed.
+LEVEL='"$1"'
+
+set_level() {
+  local led max
+  for led in /sys/class/leds/*kbd_backlight*; do
+    [ -e "$led/brightness" ] || continue
+    max=$(cat "$led/max_brightness")
+    echo $(( (max * $1 + 50) / 100 )) > "$led/brightness"
+  done
+}
+
+apply() {
+  if grep -qs closed /proc/acpi/button/lid/*/state; then set_level 0; else set_level "$LEVEL"; fi
+}
+
+case $1 in
+  pre)
+    if [ "${SYSTEMD_SLEEP_ACTION:-$2}" = hibernate ] && ! grep -qis asus /sys/class/dmi/id/sys_vendor; then
+      # The laptop powers off, so the keys go dark anyway. What matters is the
+      # level saved in the hibernation image: the kernel puts it straight back
+      # on resume, so the keys stay lit after the disk password instead of
+      # going dark until this script runs again. Omarchy has its own hook that
+      # zeroes the backlight before hibernating (some ASUS keyboards hang
+      # otherwise); wait for it to finish, then put the level back.
+      sleep 1
+      set_level "$LEVEL"
+    else
+      set_level 0
+    fi ;;
+  post) apply ;;
+  watch)
+    apply
+    stdbuf -oL gdbus monitor --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1 |
+      while read -r line; do
+        case $line in *LidClosed*) apply ;; esac
+      done ;;
+esac
+exit 0'
+  $SUDO chmod 755 "$KBD_HOOK"
+
+  # Start after systemd has restored the last saved level, so ours wins.
+  local after="systemd-logind.service" led
+  for led in $(kbd_leds); do after+=" systemd-backlight@leds:$(basename "$led").service"; done
+
+  write_root_file "$KBD_UNIT_FILE" "# Managed by lid-sleep
+[Unit]
+Description=Keyboard backlight level while awake (lid-sleep)
+After=$after
+
+[Service]
+ExecStart=$KBD_HOOK watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target"
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --quiet "$KBD_UNIT"
+  $SUDO systemctl restart "$KBD_UNIT"
+  install_early_backlight "$1"
+}
+
+remove_backlight() {
+  $SUDO systemctl disable --now --quiet "$KBD_UNIT" 2>/dev/null || true
+  $SUDO rm -f "$KBD_HOOK" "$KBD_UNIT_FILE"
+  $SUDO systemctl daemon-reload
+  remove_early_backlight
+}
+
+cmd_backlight() {
+  local level=${1:-}
+  if [[ -z $level ]]; then
+    echo "Keyboard backlight: $(kbd_level)"
+  elif [[ $level == manual ]]; then
+    remove_backlight
+    echo "Keyboard backlight: no longer managed."
+  elif [[ ${level%\%} =~ ^[0-9]+$ ]] && (( 10#${level%\%} >= 1 && 10#${level%\%} <= 100 )); then
+    level=$(( 10#${level%\%} ))
+    [[ -n $(kbd_leds) ]] || { echo "No keyboard backlight found on this laptop." >&2; exit 1; }
+    install_backlight "$level"
+    echo "Keyboard backlight: $level% while awake, off while asleep or with the lid closed."
+  else
+    echo "Give a brightness from 1 to 100, or 'manual'." >&2; exit 1
+  fi
 }
 
 apply_mode() { # action, delay
@@ -151,6 +361,8 @@ cmd_status() {
   echo "Lid close (AC):      $(systemd-analyze cat-config systemd/logind.conf | awk -F= '/^HandleLidSwitchExternalPower=/{v=$2} END{print v?v:"same as battery"}')"
   local d; d=$(systemd-analyze cat-config systemd/sleep.conf | awk -F= '/^HibernateDelaySec=/{v=$2} END{print v}')
   [[ -n $d ]] && echo "Hibernate after:     $d (on battery)"
+  local k; k=$(kbd_level)
+  [[ $k == manual ]] || echo "Keyboard backlight:  $k% while awake"
   echo "Sleep type:          $(cat /sys/power/mem_sleep)"
   echo "Hibernation ready:   $(hibernation_ready && echo yes || echo no)"
   echo
@@ -160,6 +372,7 @@ cmd_status() {
 
 cmd_remove() {
   $SUDO rm -f "$LOGIND_CONF" "$SLEEP_CONF" "$HOOK"
+  remove_backlight
   reload_logind
   echo "Removed. Lid close is back to the system default (sleep only)."
 }
@@ -188,14 +401,16 @@ cmd_json() {
       printf "%s{\"start\":%d,\"minutes\":%d,\"type\":\"%s\",\"from\":%d,\"to\":%d}",
         sep, t, ($1-t)/60, $4, p, $5; sep=","; t=0
     }' "$STATE_DIR/history")
-  printf '{"mode":"%s","delay":"%s","hibernationReady":%s,"recording":%s,"history":[%s]}\n' \
-    "$mode" "$delay" "$ready" "$([[ -x $HOOK ]] && echo true || echo false)" "$hist"
+  printf '{"mode":"%s","delay":"%s","hibernationReady":%s,"recording":%s,"backlight":"%s","backlightAvailable":%s,"history":[%s]}\n' \
+    "$mode" "$delay" "$ready" "$([[ -x $HOOK ]] && echo true || echo false)" \
+    "$(kbd_level)" "$([[ -n $(kbd_leds) ]] && echo true || echo false)" "$hist"
 }
 
 case ${1:-status} in
   status) cmd_status ;;
   set) shift; cmd_set "$@" ;;
   delay) shift; cmd_delay "$@" ;;
+  backlight) shift; cmd_backlight "$@" ;;
   history) cmd_history ;;
   json) cmd_json ;;
   test-hibernate) echo "Hibernating in 3s... power on again to resume."; sleep 3; systemctl hibernate ;;

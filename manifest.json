@@ -2,9 +2,21 @@
   "schemaVersion": 1,
   "id": "daferia.lid-sleep",
   "name": "Lid sleep",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "daferia",
-  "description": "Choose what happens when the lid closes, and see battery used while asleep",
+  "license": "MIT",
+  "description": "Choose what happens when the lid closes, see battery used while asleep, and keep the keyboard backlight on at your level after every boot and wake",
+  "homepage": "https://github.com/Daferia/omarchy-lid-sleep",
+  "repository": "https://github.com/Daferia/omarchy-lid-sleep",
+  "keywords": [
+    "lid",
+    "sleep",
+    "hibernate",
+    "suspend",
+    "battery",
+    "keyboard backlight",
+    "laptop"
+  ],
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +25,7 @@
   },
   "barWidget": {
     "displayName": "Lid sleep",
-    "description": "Lid close mode and sleep battery history",
+    "description": "Lid close mode, keyboard backlight, and sleep battery history",
     "category": "System",
     "allowMultiple": false
   }

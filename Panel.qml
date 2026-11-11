@@ -32,6 +32,9 @@ Panel {
     { id: "ignore",    icon: "󰅙", label: "Nothing",   hint: "Ignore the lid" }
   ]
   readonly property var delays: ["15min", "30min", "1h", "2h", "3h"]
+  // "manual" leaves the keyboard backlight alone; a number keeps it at that
+  // percentage while awake and turns it off while asleep or lid-closed.
+  readonly property var backlights: ["manual", "25", "50", "75", "100"]
 
   function modeInfo(id) {
     for (var i = 0; i < modes.length; i++) if (modes[i].id === id) return modes[i]
@@ -94,6 +97,11 @@ Panel {
   function setDelay(d) {
     if (delayMinutes(d) === delayMinutes(status.delay)) return
     run(["delay", d], "Setting delay to " + d + "…")
+  }
+
+  function setBacklight(level) {
+    if (level === status.backlight) return
+    run(["backlight", level], level === "manual" ? "Releasing keyboard backlight…" : "Setting keyboard backlight to " + level + "%…")
   }
 
   onOpenedChanged: if (opened) { refresh(); cursorIndex = -1 }
@@ -296,6 +304,44 @@ Panel {
                 bordered: true
                 active: root.delayMinutes(modelData) === root.delayMinutes(root.status.delay)
                 onClicked: root.setDelay(modelData)
+              }
+            }
+          }
+        }
+
+        // ---------- Keyboard backlight ----------
+        Column {
+          visible: root.status.backlightAvailable === true
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSectionHeader {
+            text: "KEYBOARD BACKLIGHT AFTER RESTART OR WAKE"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Row {
+            id: backlightRow
+            width: parent.width
+            spacing: Style.space(6)
+            readonly property real cellWidth: (width - spacing * (root.backlights.length - 1)) / root.backlights.length
+
+            Repeater {
+              model: root.backlights
+              Button {
+                required property var modelData
+                width: backlightRow.cellWidth
+                text: modelData === "manual" ? "Manual" : modelData + "%"
+                tooltipText: modelData === "manual"
+                  ? "Leave the keyboard backlight alone"
+                  : "On at " + modelData + "% after boot and wake, off while asleep or lid closed"
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                active: root.status.backlight === modelData
+                onClicked: root.setBacklight(modelData)
               }
             }
           }
