@@ -20,6 +20,9 @@ Panel {
   property string busyText: ""
   property string errorText: ""
   property int cursorIndex: -1
+  // Newer published version, or "" when up to date or the check is off.
+  property string latest: ""
+  property bool updateChecked: false
 
   readonly property string mode: status.mode || ""
   readonly property var history: status.history || []
@@ -99,6 +102,23 @@ Panel {
     run(["delay", d], "Setting delay to " + d + "…")
   }
 
+  function checkForUpdate() {
+    if (status.updateCheck !== true) { latest = ""; return }
+    if (!updateProc.running) updateProc.running = true
+  }
+
+  function setUpdateCheck(on) {
+    if (toggleProc.running) return
+    toggleProc.command = [root.script, "updates", on ? "on" : "off"]
+    toggleProc.running = true
+  }
+
+  // First check shortly after the status loads, then once a day.
+  onStatusChanged: {
+    if (status.updateCheck !== true) { latest = ""; updateChecked = false }
+    else if (!updateChecked) { updateChecked = true; checkForUpdate() }
+  }
+
   function setBacklight(level) {
     if (level === status.backlight) return
     run(["backlight", level], level === "manual" ? "Releasing keyboard backlight…" : "Setting keyboard backlight to " + level + "%…")
@@ -129,6 +149,25 @@ Panel {
       root.refresh()
     }
   }
+
+  Process {
+    id: updateProc
+    command: [root.script, "latest"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var v = String(text || "").trim()
+        root.latest = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(v) ? v : ""
+      }
+    }
+  }
+
+  Process {
+    id: toggleProc
+    onExited: root.refresh()
+  }
+
+  Timer { interval: 86400000; running: root.status.updateCheck === true; repeat: true; onTriggered: root.checkForUpdate() }
 
   // Keep the bar icon in sync if the mode is changed from a terminal.
   Timer { interval: 60000; running: true; repeat: true; onTriggered: root.refresh() }
@@ -230,6 +269,17 @@ Panel {
           width: parent.width
         }
 
+        Text {
+          visible: root.latest !== ""
+          textFormat: Text.PlainText
+          text: "Version " + root.latest + " is available. Run: omarchy plugin update " + root.moduleName
+          color: Color.accent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+          width: parent.width
+        }
+
         PanelSeparator { foreground: root.bar.foreground }
 
         // ---------- Mode picker ----------
@@ -311,7 +361,10 @@ Panel {
 
         // ---------- Keyboard backlight ----------
         Column {
-          visible: root.status.backlightAvailable === true
+          id: backlightSection
+          // Greyed out, with a note, on laptops without a keyboard backlight.
+          readonly property bool available: root.status.backlightAvailable === true
+          visible: !!root.status.mode
           width: parent.width
           spacing: Style.space(10)
 
@@ -323,6 +376,8 @@ Panel {
 
           Row {
             id: backlightRow
+            enabled: backlightSection.available
+            opacity: backlightSection.available ? 1 : 0.35
             width: parent.width
             spacing: Style.space(6)
             readonly property real cellWidth: (width - spacing * (root.backlights.length - 1)) / root.backlights.length
@@ -340,10 +395,22 @@ Panel {
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 bordered: true
-                active: root.status.backlight === modelData
+                active: backlightSection.available && root.status.backlight === modelData
                 onClicked: root.setBacklight(modelData)
               }
             }
+          }
+
+          Text {
+            visible: !backlightSection.available
+            textFormat: Text.PlainText
+            text: "Unavailable: this laptop has no keyboard backlight."
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            width: parent.width
           }
         }
 
@@ -395,6 +462,22 @@ Panel {
               }
             }
           }
+        }
+
+        PanelSeparator { foreground: root.bar.foreground }
+
+        // ---------- Update check ----------
+        Toggle {
+          width: parent.width
+          label: "Check for updates"
+          description: root.status.version
+            ? "Version " + root.status.version + ". Asks GitHub once a day if there is a newer one."
+            : "Asks GitHub once a day if there is a newer version."
+          checked: root.status.updateCheck === true
+          foreground: root.bar.foreground
+          fontFamily: root.bar.fontFamily
+          titleSize: Style.font.bodySmall
+          onClicked: root.setUpdateCheck(!checked)
         }
       }
     }

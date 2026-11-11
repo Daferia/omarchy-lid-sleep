@@ -36,7 +36,12 @@ Pick a level under **Keyboard backlight after restart or wake** and the plugin l
 
 Leave it on **Manual** (the default) and the plugin doesn't touch the backlight.
 The backlight keys still work; your picked level returns at the next wake,
-lid open, or boot. The option only appears on laptops with a keyboard backlight.
+lid open, or boot. On a laptop without a keyboard backlight the option is greyed out.
+
+It controls the laptop's built-in keyboard. External keyboards normally run
+their own lighting and aren't touched; the rare exception is one that Linux
+itself exposes as a keyboard backlight (a few Logitech and ASUS models), which
+follows the same level while it is plugged in.
 
 ## Install
 
@@ -67,7 +72,23 @@ Optional: to also get the `lid-sleep` terminal command:
 - **When the lid closes:** Smart (sleep, then hibernate), Sleep, Hibernate, Lock, or Nothing
 - **Hibernate after:** 15m / 30m / 1h / 2h / 3h (Smart mode only)
 - **Keyboard backlight after restart or wake:** Manual, or 25 / 50 / 75 / 100% (see [Keyboard backlight](#keyboard-backlight))
+- **Check for updates:** on by default; see [Updates](#updates)
 - **Battery used while asleep:** average drain per sleep type, plus your recent sleeps
+
+## Updates
+
+Omarchy doesn't tell you when a plugin has a new version, so the widget checks
+for you: once a day it reads the version number from this repository on GitHub,
+and shows a line at the top of the panel when a newer one is out. Nothing is
+downloaded or installed. To update, run:
+
+```sh
+omarchy plugin update daferia.lid-sleep
+omarchy restart shell
+```
+
+Don't want the check? Turn off **Check for updates** at the bottom of the panel,
+or run `lid-sleep updates off`. With it off the plugin never uses the network.
 
 ## Command line
 
@@ -78,6 +99,7 @@ lid-sleep set suspend|hibernate|lock|ignore
 lid-sleep delay 30min          change the hibernate delay
 lid-sleep backlight 50         keyboard backlight at 50% while awake, off while asleep or lid closed
 lid-sleep backlight manual     stop managing the keyboard backlight
+lid-sleep updates on|off       turn the daily update check on or off
 lid-sleep history              battery used during each recent sleep
 lid-sleep test-hibernate       hibernate now to check that it works
 lid-sleep remove               undo everything

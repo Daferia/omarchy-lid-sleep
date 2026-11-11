@@ -19,6 +19,11 @@ KBD_EARLY=lid-sleep-kbd-backlight
 KBD_EARLY_BUILD=/etc/initcpio/install/$KBD_EARLY
 KBD_EARLY_RUN=/etc/initcpio/hooks/$KBD_EARLY
 KBD_EARLY_CONF=/etc/mkinitcpio.conf.d/zz-$KBD_EARLY.conf
+# Update check: the one place this plugin talks to the network. It reads the
+# version line of the published manifest, at most once a day, and can be
+# turned off with `lid-sleep updates off`.
+UPDATE_URL=https://raw.githubusercontent.com/Daferia/omarchy-lid-sleep/main/manifest.json
+UPDATE_OFF=${XDG_CONFIG_HOME:-$HOME/.config}/lid-sleep/no-update-check
 
 set -euo pipefail
 
@@ -40,6 +45,8 @@ Usage: lid-sleep <command>
                          off while asleep or with the lid closed (e.g. 50)
   backlight manual       Stop managing the keyboard backlight
   history                Battery used during each recent sleep
+  updates on|off         Check GitHub once a day for a newer version (default on)
+  latest                 Print the newer version number, if there is one
   json                   Status as JSON (used by the desktop widget)
   test-hibernate         Hibernate right now to check it works (saves your session)
   remove                 Remove lid-sleep settings and restore defaults
@@ -377,6 +384,34 @@ cmd_remove() {
   echo "Removed. Lid close is back to the system default (sleep only)."
 }
 
+manifest_version() { # manifest text on stdin -> x.y.z, or nothing
+  sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([0-9]\{1,4\}\.[0-9]\{1,4\}\.[0-9]\{1,4\}\)".*/\1/p' | head -n 1
+}
+
+local_version() {
+  manifest_version <"$(dirname "$(realpath "$0")")/../manifest.json" 2>/dev/null || true
+}
+
+cmd_updates() {
+  case ${1:-} in
+    on) rm -f "$UPDATE_OFF"; echo "Update check: on (asks GitHub once a day)." ;;
+    off) mkdir -p "$(dirname "$UPDATE_OFF")"; : >"$UPDATE_OFF"; echo "Update check: off." ;;
+    "") echo "Update check: $([[ -e $UPDATE_OFF ]] && echo off || echo on)" ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+cmd_latest() {
+  # Prints the published version only when it is newer than this copy.
+  [[ -e $UPDATE_OFF ]] && return 0
+  local mine theirs
+  mine=$(local_version)
+  theirs=$(curl -fsS --proto '=https' --max-time 10 --max-filesize 20000 "$UPDATE_URL" 2>/dev/null | manifest_version) || true
+  [[ -n $mine && -n $theirs && $mine != "$theirs" ]] || return 0
+  [[ $(printf '%s\n%s\n' "$mine" "$theirs" | sort -V | tail -n 1) == "$theirs" ]] && echo "$theirs"
+  return 0
+}
+
 cmd_install() {
   mkdir -p "$HOME/.local/bin"
   ln -sf "$(realpath "$0")" "$HOME/.local/bin/lid-sleep"
@@ -401,9 +436,10 @@ cmd_json() {
       printf "%s{\"start\":%d,\"minutes\":%d,\"type\":\"%s\",\"from\":%d,\"to\":%d}",
         sep, t, ($1-t)/60, $4, p, $5; sep=","; t=0
     }' "$STATE_DIR/history")
-  printf '{"mode":"%s","delay":"%s","hibernationReady":%s,"recording":%s,"backlight":"%s","backlightAvailable":%s,"history":[%s]}\n' \
+  printf '{"mode":"%s","delay":"%s","hibernationReady":%s,"recording":%s,"backlight":"%s","backlightAvailable":%s,"version":"%s","updateCheck":%s,"history":[%s]}\n' \
     "$mode" "$delay" "$ready" "$([[ -x $HOOK ]] && echo true || echo false)" \
-    "$(kbd_level)" "$([[ -n $(kbd_leds) ]] && echo true || echo false)" "$hist"
+    "$(kbd_level)" "$([[ -n $(kbd_leds) ]] && echo true || echo false)" \
+    "$(local_version)" "$([[ -e $UPDATE_OFF ]] && echo false || echo true)" "$hist"
 }
 
 case ${1:-status} in
@@ -411,6 +447,8 @@ case ${1:-status} in
   set) shift; cmd_set "$@" ;;
   delay) shift; cmd_delay "$@" ;;
   backlight) shift; cmd_backlight "$@" ;;
+  updates) shift; cmd_updates "$@" ;;
+  latest) cmd_latest ;;
   history) cmd_history ;;
   json) cmd_json ;;
   test-hibernate) echo "Hibernating in 3s... power on again to resume."; sleep 3; systemctl hibernate ;;

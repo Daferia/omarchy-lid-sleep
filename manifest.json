@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "daferia.lid-sleep",
   "name": "Lid sleep",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "daferia",
   "license": "MIT",
   "description": "Choose what happens when the lid closes, see battery used while asleep, and keep the keyboard backlight on at your level after every boot and wake",
