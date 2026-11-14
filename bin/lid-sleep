@@ -216,19 +216,36 @@ apply() {
   if grep -qs closed /proc/acpi/button/lid/*/state; then set_level 0; else set_level "$LEVEL"; fi
 }
 
+# systemd starts every sleep hook at the same moment and waits for them all,
+# so the only way to write last is to wait until the others have exited. They
+# are our siblings: the other children of the process that started us. True
+# once we have been the only one left for two checks in a row; false if they
+# are still running after about 10 seconds or we cannot tell.
+other_hooks_done() {
+  local tries=0 quiet=0
+  command -v pgrep >/dev/null || return 1
+  while [ "$tries" -lt 100 ]; do
+    if pgrep -P "$PPID" | grep -qvx "$$"; then quiet=0; else quiet=$((quiet + 1)); fi
+    [ "$quiet" -ge 2 ] && return 0
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
 case $1 in
   pre)
+    set_level 0
     if [ "${SYSTEMD_SLEEP_ACTION:-$2}" = hibernate ] && ! grep -qis asus /sys/class/dmi/id/sys_vendor; then
       # The laptop powers off, so the keys go dark anyway. What matters is the
       # level saved in the hibernation image: the kernel puts it straight back
       # on resume, so the keys stay lit after the disk password instead of
       # going dark until this script runs again. Omarchy has its own hook that
       # zeroes the backlight before hibernating (some ASUS keyboards hang
-      # otherwise); wait for it to finish, then put the level back.
-      sleep 1
-      set_level "$LEVEL"
-    else
-      set_level 0
+      # otherwise). Put the level back only once every other hook has exited,
+      # so nothing can write after us; if that cannot be confirmed, leave it
+      # at zero and let the post step light the keys as before.
+      if other_hooks_done; then set_level "$LEVEL"; fi
     fi ;;
   post) apply ;;
   watch)
